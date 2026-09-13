@@ -19,9 +19,8 @@ from chromadb.utils import embedding_functions
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from pydantic import BaseModel
-from graph import run, format_human_readable  # was: from risk_classifier import classify, format_human_readable
+from graph import run, format_human_readable, format_human_readable, CHROMA_DIR, EMBED_MODEL 
 
-#from risk_classifier import classify, format_human_readable, CHROMA_DIR, EMBED_MODEL
 from ingest import build_index
 
 app = FastAPI(title="AI Governance & Compliance Assistant")
