@@ -19,8 +19,9 @@ from chromadb.utils import embedding_functions
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from pydantic import BaseModel
+from graph import run, format_human_readable  # was: from risk_classifier import classify, format_human_readable
 
-from risk_classifier import classify, format_human_readable, CHROMA_DIR, EMBED_MODEL
+#from risk_classifier import classify, format_human_readable, CHROMA_DIR, EMBED_MODEL
 from ingest import build_index
 
 app = FastAPI(title="AI Governance & Compliance Assistant")
@@ -112,7 +113,7 @@ def assess(req: AssessRequest):
     """Returns the structured JSON result — for other programs/scripts to consume."""
     if not req.use_case.strip():
         raise HTTPException(status_code=400, detail="use_case cannot be empty")
-    result = classify(req.use_case, req.collection)
+    result = run(req.use_case, req.collection)
     return result
 
 
@@ -121,5 +122,5 @@ def assess_readable(req: AssessRequest):
     """Returns a plain-English summary — use this one for demos and screenshots."""
     if not req.use_case.strip():
         raise HTTPException(status_code=400, detail="use_case cannot be empty")
-    result = classify(req.use_case, req.collection)
+    result = run(req.use_case, req.collection)
     return format_human_readable(result)
