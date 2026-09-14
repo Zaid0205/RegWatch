@@ -37,40 +37,56 @@ from langgraph.graph import END, StateGraph
 
 CHROMA_DIR = "./chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
-TOP_K = 10
 GEMINI_MODEL = "gemini-3.6-flash"
 MAX_EXTRACTOR_ATTEMPTS = 2  # total attempts allowed: 1 initial + (MAX_EXTRACTOR_ATTEMPTS - 1) retries
 
-RISK_CLASSIFIER_PROMPT = """You are a risk-tier classifier for AI systems under the EU AI Act.
+# Day 4: query every framework collection that exists and merge results,
+# tagged by framework, instead of a single hardcoded collection. Add a new
+# entry here (and ingest it with ingest.py) to bring in another framework —
+# no other code changes needed.
+FRAMEWORK_COLLECTIONS = {
+    "eu-ai-act": "EU AI Act",
+    "sdaia-ai-ethics": "SDAIA AI Ethics Principles",
+}
+TOP_K_PER_FRAMEWORK = 6
+
+RISK_CLASSIFIER_PROMPT = """You are a risk-tier classifier for AI systems, working across multiple regulatory frameworks.
 
 You will be given a description of an AI system / use case and retrieved
-excerpts from the regulation. Classify ONLY the risk tier — do not extract
-obligations or citations, another agent handles that.
+excerpts, each labeled with which framework it came from (e.g. "EU AI Act"
+or "SDAIA AI Ethics Principles"). Classify ONLY the risk tier — do not
+extract obligations or citations, another agent handles that.
 
-Base your answer only on the retrieved excerpts. If they don't clearly
-support a tier, say "unclear" rather than guessing.
+If excerpts from more than one framework are present, note in your reasoning
+whether they agree on the risk tier or diverge — this is often the most
+useful thing to flag for someone operating across jurisdictions. Base your
+answer only on the retrieved excerpts. If they don't clearly support a tier,
+say "unclear" rather than guessing.
 
 Return ONLY valid JSON, no markdown fences, no preamble:
 {
   "risk_tier": "unacceptable" | "high-risk" | "limited-risk" | "minimal-risk" | "unclear",
   "confidence": "low" | "medium" | "high",
-  "reasoning": "2-4 sentence explanation grounded in the excerpts"
+  "reasoning": "2-4 sentence explanation grounded in the excerpts, noting cross-framework agreement/divergence if relevant"
 }
 """
 
-EXTRACTOR_PROMPT = """You are a compliance-obligations extractor for AI systems under the EU AI Act.
+EXTRACTOR_PROMPT = """You are a compliance-obligations extractor, working across multiple regulatory frameworks.
 
 You will be given a description of an AI system / use case and retrieved
-excerpts from the regulation. Extract citations and obligations ONLY — do
-not classify a risk tier, another agent handles that.
+excerpts, each labeled with which framework it came from (e.g. "EU AI Act"
+or "SDAIA AI Ethics Principles"). Extract citations and obligations ONLY —
+do not classify a risk tier, another agent handles that.
 
-Base your answer only on the retrieved excerpts. ONLY cite an article if its
-exact label appears in the excerpts below — do not cite from general
-knowledge of the EU AI Act.
+Cite the specific label shown in brackets before each excerpt (e.g. "Article 6"
+or "Principle: Fairness"), and keep obligations from different frameworks
+distinguishable rather than merging them into one generic list. Base your
+answer only on the retrieved excerpts. ONLY cite a label if its exact text
+appears in the excerpts below — do not cite from general knowledge.
 
 Return ONLY valid JSON, no markdown fences, no preamble:
 {
-  "cited_articles": ["Article X", "Article Y"],
+  "cited_articles": ["Article X", "Principle: Y"],
   "compliance_obligations": ["short bullet", "short bullet"],
   "flags_for_human_review": ["anything ambiguous or missing from context"]
 }
@@ -91,6 +107,7 @@ class GraphState(TypedDict, total=False):
     # Set by retrieve_node
     hits: list[dict]
     context: str
+    frameworks_queried: list[str]
     # Set by risk_classifier_node
     risk_tier: Optional[str]
     confidence: Optional[str]
@@ -118,20 +135,35 @@ def supervisor_node(state: GraphState) -> GraphState:
 
 
 def retrieve_node(state: GraphState) -> GraphState:
-    """Unchanged from Day 1/2."""
+    """Day 4: queries every collection in FRAMEWORK_COLLECTIONS and merges
+    the results, tagging each hit with which framework it came from. A
+    collection that hasn't been ingested yet is skipped rather than crashing
+    the whole request — so this still works fine before you've run ingest.py
+    on the SDAIA document, it just won't have SDAIA hits yet."""
     client = chromadb.PersistentClient(path=CHROMA_DIR)
     embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
-    collection = client.get_collection(name=state["collection"], embedding_function=embed_fn)
 
-    results = collection.query(query_texts=[state["use_case"]], n_results=TOP_K)
-    hits = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        hits.append({"text": doc, "article": meta.get("article", "unspecified")})
+    hits: list[dict] = []
+    frameworks_queried: list[str] = []
+    for collection_name, framework_label in FRAMEWORK_COLLECTIONS.items():
+        try:
+            collection = client.get_collection(name=collection_name, embedding_function=embed_fn)
+        except Exception:
+            continue  # not ingested yet — skip gracefully
 
-    context_lines = [f"[{h['article']}]\n{h['text'].strip()}\n" for h in hits]
+        frameworks_queried.append(framework_label)
+        results = collection.query(query_texts=[state["use_case"]], n_results=TOP_K_PER_FRAMEWORK)
+        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+            hits.append({
+                "text": doc,
+                "article": meta.get("article", "unspecified"),
+                "framework": framework_label,
+            })
+
+    context_lines = [f"[{h['framework']} — {h['article']}]\n{h['text'].strip()}\n" for h in hits]
     context = "\n---\n".join(context_lines)
 
-    return {**state, "hits": hits, "context": context}
+    return {**state, "hits": hits, "context": context, "frameworks_queried": frameworks_queried}
 
 
 def _build_user_prompt(state: GraphState, retry_note: str = "") -> str:
@@ -280,6 +312,11 @@ def build_graph():
 
 
 async def run_async(use_case: str, collection: str = "eu-ai-act") -> dict:
+    """Note: `collection` is kept only so app.py's existing call sites don't
+    need to change — Day 4's retrieve_node now queries every framework in
+    FRAMEWORK_COLLECTIONS regardless of this value. Left as-is rather than
+    ripping it out mid-week; worth cleaning up before this goes in front of
+    anyone reviewing the code closely."""
     app_graph = build_graph()
     return await app_graph.ainvoke({"use_case": use_case, "collection": collection})
 
